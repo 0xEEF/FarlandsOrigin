@@ -1,0 +1,4 @@
+# The distance from world origin the Far Lands begin at, precise to within 4 blocks.
+# Matches the Fabric mod's config.yml `distance` option. Default is where the
+# classic Beta 1.7 Far Lands actually started, 12550824.
+distance: 12550824

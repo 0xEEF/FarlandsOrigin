@@ -1,0 +1,9 @@
+name: FarlandsOrigin
+version: '${version}'
+main: dev.xeaf.farlandsorigin.FarlandsOrigin
+bootstrapper: dev.xeaf.farlandsorigin.FarlandsOriginBootstrap
+api-version: '1.21'
+description: Brings the classic style of Far Lands to modern Paper/Folia (port of the Fabric mod by ThePotatoArchivist)
+authors: [ThePotatoArchivist]
+website: https://github.com/ThePotatoArchivist/ClassicFarlands
+folia-supported: true

@@ -1,0 +1,102 @@
+plugins {
+    id 'java'
+    id 'io.papermc.paperweight.userdev' version "${paperweight_version}"
+    id 'com.gradleup.shadow' version "${shadow_version}"
+}
+
+version = project.mod_version
+group = project.maven_group
+
+repositories {
+    mavenCentral()
+    maven { url 'https://repo.papermc.io/repository/maven-public/' }
+}
+
+dependencies {
+    // Gives us access to Mojang-mapped NMS classes (same names the Fabric mod's
+    // mixins already targeted, since Paper runs on the same official mappings).
+    // Since 26.1, Paper ships completely unobfuscated - no more Spigot mapping
+    // layer at all - so this dev bundle IS what actually runs in production now,
+    // not just a dev-time convenience remapped away at build time.
+    paperweight.paperDevBundle("${project.minecraft_version}.build.+")
+
+    // Plain ASM for the java agent's bytecode transform. Deliberately NOT using
+    // SpongePowered Mixin here: modern Mixin (the version Fabric mods use) is
+    // built around an IMixinService tied to a launch platform (Fabric's Knot
+    // loader, ModLauncher, LaunchWrapper, ...) and does not have an officially
+    // supported "just run it from a plain -javaagent on a stock JVM" mode. The
+    // old standalone "agent" module in the Mixin repo is a different, legacy
+    // mechanism (class hot-swap for dev tooling), not the mixin-transform
+    // pipeline mixinextras/@ModifyExpressionValue etc. rely on. Rather than
+    // ship an unverifiable bootstrap sequence, this does the two required
+    // bytecode edits directly with ASM, which is stable, well-documented, and
+    // works with a plain java.lang.instrument agent.
+    implementation "org.ow2.asm:asm:${asm_version}"
+    implementation "org.ow2.asm:asm-tree:${asm_version}"
+    implementation "org.ow2.asm:asm-commons:${asm_version}"
+
+    // Gson for FarlandsOriginDatapackInstaller's JSON read/write. Not
+    // shaded/bundled - Paper's own server already ships Gson (it's what
+    // NMS's own JSON codec plumbing uses internally), so this is
+    // compileOnly purely to guarantee the symbol resolves at build time
+    // even if some future dev bundle doesn't expose it transitively;
+    // bundling our own copy would risk a duplicate-class conflict with
+    // whatever version the server already has loaded.
+    compileOnly 'com.google.code.gson:gson:2.11.0'
+}
+
+// As of Paper 26.1, the server itself ships unobfuscated (plain Mojang
+// mappings), and reobfJar no longer works/exists for these versions - the
+// dev-bundle-compiled jar IS the production jar now. Say so explicitly
+// instead of relying on paperweight's default, since that default changed
+// behaviour across this exact version boundary.
+paperweight.reobfArtifactConfiguration = io.papermc.paperweight.userdev.ReobfArtifactConfiguration.getMOJANG_PRODUCTION()
+
+// Paper 26.2's dev bundle (paper-api, leafpile, etc.) is compiled for and
+// requires JVM runtime 25+ - this isn't optional/backwards compatible like
+// most "options.release" choices usually are. Build (and run Gradle itself)
+// with JDK 25. If paperweightUserdevSetup or compileJava complain about a
+// *different* required version later (Paper bumps this over time), match
+// whatever version the error message asks for here.
+tasks.withType(JavaCompile).configureEach {
+    options.release = 25
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_25
+    targetCompatibility = JavaVersion.VERSION_25
+}
+
+processResources {
+    inputs.property "version", project.version
+    filesMatching("paper-plugin.yml") {
+        expand "version": inputs.properties.version
+    }
+}
+
+// Bundle ASM straight into the plugin jar so it can act as its own java
+// agent (see Launch-Agent-Class in the manifest) with no extra installs.
+shadowJar {
+    archiveClassifier.set('')
+    dependencies {
+        include(dependency('org.ow2.asm:asm'))
+        include(dependency('org.ow2.asm:asm-tree'))
+        include(dependency('org.ow2.asm:asm-commons'))
+    }
+    manifest {
+        attributes(
+                // Standard java.lang.instrument agent entry point. Server owners
+                // add -javaagent:plugins/FarlandsOrigin.jar to their startup
+                // flags; this is what makes real bytecode-level Mixin injection
+                // possible at all outside of a mod loader.
+                'Launch-Agent-Class': 'dev.xeaf.farlandsorigin.FarlandsOriginAgent',
+                'Premain-Class'     : 'dev.xeaf.farlandsorigin.FarlandsOriginAgent',
+                'Can-Redefine-Classes': 'true',
+                'Can-Retransform-Classes': 'true'
+        )
+    }
+}
+
+// No reobfJar wiring needed/possible on 26.1+ (see the reobfArtifactConfiguration
+// note above) - shadowJar's plain output is the deployable jar.
+tasks.assemble.dependsOn(tasks.shadowJar)

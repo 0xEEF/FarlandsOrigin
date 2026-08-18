@@ -1,7 +1,7 @@
 # FarlandsOrigin - Paper/Folia port
 
 Port of [ThePotatoArchivist's ClassicFarlands](https://github.com/ThePotatoArchivist/ClassicFarlands)
-(MIT licensed - `LICENSE` carried over unmodified) from Fabric to Paper/Folia,
+(MIT licensed - read `LICENSE` file) from Fabric to Paper/Folia,
 targeting Minecraft 26.1 / 26.2.
 
 ## WARNING: Made with AI (cuz idk how to use Java)

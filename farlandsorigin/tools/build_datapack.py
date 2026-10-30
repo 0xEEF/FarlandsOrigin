@@ -37,6 +37,9 @@ from pathlib import Path
 NAMESPACE = "farlandsorigin"
 PRESETS = ["overworld", "amplified", "large_biomes"]
 NOISE_SETTINGS_PREFIX = "data/minecraft/worldgen/noise_settings/"
+VANILLA_FINAL_DENSITY = "data/minecraft/worldgen/density_function/overworld/final_density.json"
+SLOPED_CHEESE = "minecraft:overworld/sloped_cheese"
+BASE_3D_NOISE = "minecraft:overworld/base_3d_noise"
 
 
 def read_json_from_zip(zf: zipfile.ZipFile, path: str):
@@ -83,28 +86,68 @@ def find_data_zip(jar_path: Path) -> zipfile.ZipFile:
     )
 
 
+def replace_underground_branch(node) -> bool:
+    """
+    Finds the range_choice on overworld/sloped_cheese inside vanilla's
+    final_density and replaces its when_out_of_range (vanilla's cave carving)
+    with overworld/base_3d_noise, in place. This is the edit the original mod
+    author made by hand for every Minecraft version; doing it from the
+    server's own data means it cannot go stale when Mojang restructures
+    final_density (26.3 did: argument1/argument2 became left/right,
+    y_clamped_gradient became gradient, a lerp type appeared, ...).
+    """
+    if isinstance(node, dict):
+        if (node.get("type") == "minecraft:range_choice"
+                and node.get("input") == SLOPED_CHEESE
+                and "when_out_of_range" in node):
+            node["when_out_of_range"] = BASE_3D_NOISE
+            return True
+        return any(replace_underground_branch(v) for v in list(node.values()))
+    if isinstance(node, list):
+        return any(replace_underground_branch(v) for v in node)
+    return False
+
+
+def detect_pack_major(zf, names):
+    """
+    Data pack format of this server. Since pack format 82 a pack declares
+    min_format/max_format instead of pack_format. version.json used to have
+    pack_version.data; it now has data_major/data_minor.
+    """
+    if "version.json" in names:
+        try:
+            pack_version = read_json_from_zip(zf, "version.json").get("pack_version", {})
+            if "data_major" in pack_version:
+                return pack_version["data_major"]
+            if "data" in pack_version:
+                return pack_version["data"]
+        except Exception:
+            pass
+    return None
+
+
 def build(jar_path: Path, out_dir: Path):
     zf = find_data_zip(jar_path)
     names = set(zf.namelist())
 
-    pack_format = None
-    if "version.json" in names:
-        try:
-            version_data = read_json_from_zip(zf, "version.json")
-            pack_format = version_data.get("pack_version", {}).get("data")
-        except Exception:
-            pass
-    if pack_format is None:
-        print("WARNING: couldn't auto-detect data pack_format from version.json; "
-              "defaulting to 71. Check your server's actual vanilla datapack "
-              "pack.mcmeta (unzip the jar and look under data/) and fix "
-              "pack.mcmeta by hand if generation refuses to load.", file=sys.stderr)
-        pack_format = 71
+    pack_major = detect_pack_major(zf, names)
+    if pack_major is None:
+        sys.exit("Could not determine this server's data pack format from version.json - "
+                 "refusing to write a pack.mcmeta that the game would reject.")
 
     density_dir = out_dir / "data" / NAMESPACE / "worldgen" / "density_function"
     noise_settings_dir = out_dir / "data" / "minecraft" / "worldgen" / "noise_settings"
     density_dir.mkdir(parents=True, exist_ok=True)
     noise_settings_dir.mkdir(parents=True, exist_ok=True)
+
+    if VANILLA_FINAL_DENSITY not in names:
+        sys.exit(f"{VANILLA_FINAL_DENSITY} not found - cannot derive old_overworld_noise.")
+    old_noise = read_json_from_zip(zf, VANILLA_FINAL_DENSITY)
+    if not replace_underground_branch(old_noise):
+        sys.exit(f"No range_choice on {SLOPED_CHEESE} found in {VANILLA_FINAL_DENSITY}; Mojang "
+                 f"restructured it. Cannot derive old_overworld_noise automatically for this version.")
+    (density_dir / "old_overworld_noise.json").write_text(json.dumps(old_noise, indent=2))
+    print("Derived old_overworld_noise from this server's own overworld/final_density.")
 
     wrote_any = False
     for preset in PRESETS:
@@ -155,7 +198,8 @@ def build(jar_path: Path, out_dir: Path):
     (out_dir / "pack.mcmeta").write_text(json.dumps({
         "pack": {
             "description": "FarlandsOrigin - Far Lands worldgen overrides",
-            "pack_format": pack_format
+            "min_format": pack_major,
+            "max_format": pack_major
         }
     }, indent=2))
 
@@ -165,10 +209,7 @@ def build(jar_path: Path, out_dir: Path):
               "work with it as-is.", file=sys.stderr)
         sys.exit(1)
 
-    print(f"\nDone. Copy {out_dir} into <world>/datapacks/, then also copy "
-          f"data/farlandsorigin/worldgen/density_function/old_overworld_noise.json "
-          f"from this repo's datapack/ folder into the same spot if it isn't there "
-          f"already, and restart the server.")
+    print(f"\nDone. Copy {out_dir} into <world>/datapacks/ and restart the server.")
 
 
 if __name__ == "__main__":

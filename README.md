@@ -1,104 +1,82 @@
 # FarlandsOrigin - Paper/Folia port
 
 Port of [ThePotatoArchivist's ClassicFarlands](https://github.com/ThePotatoArchivist/ClassicFarlands)
-(MIT licensed - read `LICENSE` file) from Fabric to Paper/Folia,
-targeting Minecraft 26.1 / 26.2.
+(MIT licensed - `LICENSE` carried over unmodified) from Fabric to Paper/Folia.
 
-## WARNING: Made with AI (cuz idk how to use Java)
-## PLEASE SUPPORT [THE ORIGINAL DEVELOPER](https://github.com/ThePotatoArchivist)
+**This build targets Minecraft 26.3 and newer.** 26.3 rewrote Minecraft's
+density function system, so it does not load on 26.2 or older - on those, keep
+using a 1.0.x build (the bootstrapper detects this and stops with a clear
+message instead of a `NoClassDefFoundError`).
 
-I am a random dev, and you should really not trust random stuff you find on the Internet. Take a look at the source code which is only a few hundred lines long. (click on the GitHub "view source" link on the side). And if you prefer, compile the project yourself with `mvn clean package` (requires Java JDK 21+ and Maven installed).
-
-**Read this whole file before deploying.** This is not a routine "recompile
-against a different API" port. Fabric gives mods three things Paper's plugin
-API does not: an init hook that runs before Mojang's registries freeze,
-Mixin bytecode injection into internal worldgen classes, and generic
-JSON-patching of datapack files at load time. Everything below exists to
-replace those three things without either of them.
+**Read this file before deploying.** This is not a "recompile against another
+API" port. Fabric gives mods things Paper's plugin API does not: bytecode
+injection into worldgen classes, an init hook before registries are built, and
+generic JSON-patching of datapack files at load time. Everything below
+replaces those.
 
 ## What changed vs. the Fabric mod, and why
 
-| Fabric mod piece | Paper port | Why |
+| Fabric mod piece | This port | Why |
 |---|---|---|
-| `Registry.register(BuiltInRegistries.DENSITY_FUNCTION_TYPE, ...)` in `onInitialize` | `FarlandsOriginBootstrap` (a `PluginBootstrap`) + `NmsRegistryUnfreezer`, reflection | Paper plugins load *after* `BuiltInRegistries` is already frozen; there's no Paper API for this registry at all (checked against the current `RegistryEvents` javadocs - it only covers enchantments/entity variants/dialogs/etc., not worldgen). |
-| `RadiusCheck.java` | Ported verbatim | Plain vanilla `DensityFunction` code, nothing Fabric-specific. |
-| `BlendedNoiseMixin` / `PerlinNoiseMixin` (SpongePowered Mixin) | `FarlandsOriginAgent` + `BlendedNoiseTransformer` / `PerlinNoiseTransformer` (raw ASM via a `java.lang.instrument` agent) | Modern SpongePowered Mixin (the version mixinextras/`@ModifyExpressionValue` needs) has no supported standalone mode outside a mod loader - it's built around an `IMixinService` tied to a specific launch platform. Rather than ship an unverifiable Mixin bootstrap sequence, I did the same two bytecode edits directly with ASM, which *is* fully standalone-capable. |
-| Mixson (generic runtime JSON patching of `noise_settings`) | `FarlandsOriginDatapackInstaller` (auto, at bootstrap) / `tools/build_datapack.py` (manual fallback) + companion datapack | No equivalent exists outside Fabric's resource-reload events. Datapacks can only override a whole registry file, not patch one field - so instead of guessing at vanilla's `noise_settings.json` content for a Minecraft version I have no way to verify from here, this reads it from **the running server's own classpath** (or, manually, your server jar) and patches only `final_density`, the same way Mixson did, just at install time instead of every load. |
-| Quilt Config (`FarlandsOriginConfig`) | `FarlandsOriginState` + `config.yml` | Kaleido/Quilt Config isn't available on Paper; swapped for a plain Bukkit config. Same `distance` option, same arithmetic. |
+| `Registry.register(DENSITY_FUNCTION_TYPE, ...)` in `onInitialize` | `FarlandsOriginBootstrap` (a Paper `PluginBootstrap`) | Paper has no API for this registry (`RegistryEvents` only covers enchantments/variants/dialogs/etc.). It works because Paper runs bootstrappers at the top of `Bootstrap.bootStrap()`, *before* `BuiltInRegistries.bootStrap()` fills and freezes the registries. `NmsRegistryUnfreezer` is only a safety net. |
+| `RadiusCheck` | `RadiusCheck` - **rewritten for 26.3** | 26.3 replaced `compute(FunctionContext)`, `DensityFunction.SimpleFunction` and `KeyDispatchDataCodec` with function/sampler pairs (`compileSampler`, `DensitySampler`) and floats. Same behaviour, new shape. |
+| `BlendedNoiseMixin` (adjust `blockX/blockZ` inside `BlendedNoise.compute`) | `BlendedNoiseTransformer` + `BlendedNoiseSampler` + `BlendedNoiseHook` | `compute` and per-call contexts no longer exist. `BlendedNoise` now hands out one compiled sampler from `compileSampler(RandomSource)`; the agent wraps *that* in a sampler that adjusts X/Z on the way in - the same boundary the mixin sat on. (Hooking the generic `NoiseFunction.Sampler` instead would also shift biome/cave noise, which the original never did.) |
+| `PerlinNoiseMixin` (`wrap` -> identity, undoes the precision fix) | Mojang's own `SharedConstants.DEBUG_ENABLE_FARLANDS` | 26.3 ships a switch for exactly this. It's a `static final` read from system properties once, so the agent sets `MC_DEBUG_ENABLED`/`MC_DEBUG_ENABLE_FARLANDS` before the game starts. `MC_DEBUG_ENABLED` is only a gate inside the game's `debugFlag()` helper, so nothing else is switched on. No bytecode needed. |
+| Mixson (generic runtime JSON patching) | `FarlandsOriginDatapackInstaller` (automatic) / `tools/build_datapack.py` (manual) | Datapacks can only replace a registry file whole. The installer reads the server's own vanilla JSON off the classpath and writes the datapack into `<level-name>/datapacks/farlandsorigin/` before the server scans that folder. |
+| the hand-maintained `old_overworld_noise.json` | **derived at startup from vanilla's `overworld/final_density`** | The original author re-made this by hand every Minecraft version: swap the cave branch of the `sloped_cheese` range-choice for `base_3d_noise`. 26.3 changed the JSON format (`argument1/2` -> `left/right`, `y_clamped_gradient` -> `gradient`, new `lerp`, beardifier inlined), which broke the old copy. The installer now applies that same edit to the running server's own data, so it can't go stale. A 26.3 copy is bundled only as a fallback. |
+| Quilt Config | `config.yml` | Not available on Paper. Same `distance` option and arithmetic. |
 
 ## Install
 
-0. **Generate a Gradle wrapper first, if you don't have one.** Use Gradle
-   9.1.0 or newer - Gradle only added support for *running on* JDK 25 in
-   9.1.0 (older Gradle, including the whole 8.x line, fails with
-   "Unsupported class file major version 69" on a JDK 25 system):
+1. **Build** (needs network the first time, for the Paper dev bundle):
    ```
    cd farlandsorigin
-   gradle wrapper --gradle-version 9.7
+   ./gradlew clean build
    ```
-   From then on use `./gradlew` instead of `gradle` for every command below.
-   **Build with JDK 25**, not just "any recent LTS" - Paper 26.2's dev bundle
-   itself requires a 25+ runtime to compile against (`build.gradle`'s
-   `options.release`/`sourceCompatibility` are already set to 25 to match;
-   don't lower them without also lowering `minecraft_version`, or you'll hit
-   "Dependency resolution is looking for a library compatible with JVM
-   runtime version X, but paper-api ... is only compatible with ... 25").
+   Requirements: **JDK 25** (Paper's 26.x dev bundles require a 25+ runtime)
+   and the bundled **Gradle 9.7** wrapper. Output:
+   `build/libs/farlandsorigin-<version>.jar`. There is no reobf step - Paper
+   26.1+ runs on Mojang's names directly.
+2. Put the jar in `plugins/`.
+3. **Add the java agent flag** to your start command, *before* `-jar`:
+   ```
+   java -javaagent:plugins/farlandsorigin-<version>.jar -Xmx2G -jar folia-26.3-<build>.jar nogui
+   ```
+   This cannot be done from inside the plugin: agents are fixed at JVM
+   launch, before any server class loads. Without it you get vanilla terrain.
+4. **Start the server.** A healthy start logs (roughly in this order):
+   ```
+   [FarlandsOrigin] Registered farlandsorigin:radius_check density function type.
+   [FarlandsOrigin] Derived old_overworld_noise from this server's own overworld/final_density.
+   [FarlandsOrigin] Wrote Far Lands override for overworld.   (and amplified, large_biomes)
+   [FarlandsOrigin] FarlandsOrigin datapack auto-installed at ...
+   [FarlandsOrigin] BlendedNoise.compileSampler: hooked 1 return site(s).
+   ...
+   [FarlandsOrigin] FarlandsOrigin active: Far Lands generate from 12550821 blocks out.
+   ```
+   The last line is a *real check*: it is only printed if the agent attached,
+   Minecraft's own `DEBUG_ENABLE_FARLANDS` flag is actually on, and the
+   BlendedNoise hook was applied. Otherwise you get a specific error saying
+   which of the three is missing.
+5. **Seeing it:** `/tp @s 12550830 100 0` in creative/spectator, in an area
+   that has never been generated.
 
-1. **Set your exact target version** in `gradle.properties` -
-   `minecraft_version=26.2` (or `26.1.2`) resolves to the *latest* published
-   build for that version via `.build.+`; pin it to a specific build (e.g.
-   `26.2.build.102`) once you've picked one, so a later rebuild doesn't
-   silently jump to a newer Paper build underneath you.
-2. **Build.** `./gradlew shadowJar` - needs network access, since it pulls
-   the paperweight dev bundle for `minecraft_version` from Paper's Maven the
-   first time. Output: `build/libs/farlandsorigin-<mod_version>.jar`.
-   No separate "reobf" step - Paper 26.1+ ships fully unobfuscated
-   (Mojang mappings all the way down), so this jar already *is* what the
-   server runs; there's nothing to remap.
-3. Drop that jar in `plugins/` on your Folia (or Paper) server.
-4. **Add the java agent flag.** In your start script, *before* `-jar
-   paper.jar` (works identically for Folia's jar):
-   ```
-   java -javaagent:plugins/farlandsorigin-<mod_version>.jar <your normal flags> -jar folia-<version>.jar nogui
-   ```
-   This is not optional and can't be set from inside the plugin - agents are
-   a JVM-level concept, fixed at process launch, before any plugin code runs.
-5. **Start the server.** As of this version, the companion datapack is
-   generated and installed automatically - `FarlandsOriginBootstrap` reads
-   your server's own vanilla `noise_settings.json` files straight off the
-   classpath (the same way it already reads real NMS classes) and writes
-   the datapack into `<level-name>/datapacks/farlandsorigin/`
-   before that folder gets scanned, so there's no manual jar-hunting or
-   script-running step needed for the common case. Check the log for:
-   - `Wrote Far Lands override for overworld.` (and `amplified`,
-     `large_biomes`)
-   - `FarlandsOrigin datapack auto-installed at ...`
+**Existing worlds:** the datapack and agent only affect chunks generated
+*after* they're in place - chunks already on disk keep whatever they were
+generated as. Test in a fresh world or unexplored coordinates.
 
-   If you don't see those - e.g. your server uses a non-default `plugins`
-   folder location, so the installer's server-root guess is wrong - fall
-   back to the manual path instead:
-   ```
-   python3 farlandsorigin/tools/build_datapack.py path/to/your/server.jar farlandsorigin
-   cp datapack/farlandsorigin/data/farlandsorigin/worldgen/density_function/old_overworld_noise.json \
-      farlandsorigin/data/farlandsorigin/worldgen/density_function/
-   cp -r farlandsorigin <world-folder>/datapacks/
-   ```
-   (the script auto-detects Mojang's bundler-jar format too, so any server
-   jar you point it at - launcher stub, raw Mojang jar, already-extracted
-   one - works)
+### Manual datapack install (fallback)
 
-   Either way (auto or manual), this has to be in place *before* a world is
-   first created/loaded - Far Lands worldgen registries are baked once at
-   server boot and won't retroactively apply to chunks generated earlier,
-   same limitation the original mod has.
-6. Check the rest of the log for:
-   - `Registered farlandsorigin:radius_check density function type.`
-   - `[FarlandsOrigin] BlendedNoise.compute: patched 2 call site(s).`
-   - `[FarlandsOrigin] PerlinNoise.wrap: patched to identity function.`
-   - `FarlandsOrigin agent attached; Far Lands generation active at distance ...`
+If the automatic install logs a warning, or your server isn't launched from
+its own folder (the installer treats the working directory as the server root):
 
-   If any of these are missing or show 0 patched sites, Far Lands generation
-   is **not** active - see Troubleshooting.
+```
+python3 farlandsorigin/tools/build_datapack.py <any server jar or the server-26.3 zip> farlandsorigin
+cp -r farlandsorigin <world-folder>/datapacks/
+```
+The script drills through Mojang's bundler-jar layers by itself. A ready-made
+copy of the resulting datapack for 26.3 is in `datapack/farlandsorigin/` if
+you'd rather not run Python.
 
 ## Configuration
 
@@ -106,91 +84,71 @@ replace those three things without either of them.
 ```yaml
 distance: 12550824
 ```
-Same option and arithmetic as the Fabric mod's config.
+Applied at bootstrap (before spawn chunks generate), so changing it needs a
+restart. The effective switch point is `4 * (distance / 4) - 3` blocks,
+exactly as in the original (12550821 for the default).
 
-## Folia notes
+## Troubleshooting
 
-Nothing in this port does per-region scheduling, so there was nothing to
-port to Folia's threaded-regions model specifically - worldgen density
-functions run on whichever thread is generating a given region regardless of
-Folia vs. Paper, and none of this plugin's code touches Bukkit's
-single-threaded APIs (no entities, no block updates, no scheduling). The one
-thing to double check on Folia specifically is that `PluginBootstrap` timing
-relative to registry freezing is the same as on Paper (Folia is a Paper
-fork, so it should be, but verify on your Folia build).
+| Log line | Meaning |
+|---|---|
+| `This build of FarlandsOrigin needs Minecraft 26.3 or newer` | Running on 26.2 or older. Use a 1.0.x build. |
+| `The FarlandsOrigin java agent did not attach` | Missing `-javaagent:` flag. |
+| `Minecraft's Far Lands flag ... is off` | Something set `MC_DEBUG_ENABLE_FARLANDS=false` or `MC_DEBUG_ENABLED=false`, or `SharedConstants` was initialised before the agent ran. |
+| `could not hook BlendedNoise` / `BlendedNoise.compileSampler ... not found` | Minecraft changed that method again. Far Lands still form, but the configured distance isn't honoured exactly. |
+| `Could not derive old_overworld_noise ... falling back` | Vanilla's `final_density` no longer has a `sloped_cheese` range-choice. The bundled 26.3 copy is used, and may be wrong for newer versions. |
+| `Could not auto-generate any noise_settings overrides` | Vanilla worldgen data paths moved. Use the manual script for a precise error. |
 
-## Known limitations / what to verify before trusting this in production
+## Folia
 
-This was written and reviewed without the ability to compile or run it
-against a real Paper/Folia 26.1/26.2 server (no network or NMS jars
-available in the environment that produced it). Specifically unverified:
+Nothing here schedules anything or touches Bukkit's thread-bound APIs;
+worldgen density functions run on whichever thread generates a region, on
+Folia and Paper alike. `RadiusCheck` and `BlendedNoiseSampler` are stateless
+apart from two `volatile` ints written once at startup.
 
-- **`NmsRegistryUnfreezer.FROZEN_FIELD = "frozen"`** - the field name inside
-  vanilla's `MappedRegistry` holding its frozen state. If this throws
-  `NoSuchFieldException` at boot, inspect `MappedRegistry` in your version
-  (e.g. via a decompiler on the Paper/NMS jar) and update the constant.
-- **`BlendedNoiseTransformer`/`PerlinNoiseTransformer` target signatures** -
-  built from the method/class names your own Fabric mod's mixins already
-  target (`BlendedNoise.compute`, `PerlinNoise.wrap`, `FunctionContext.blockX/
-  blockZ`), which are Mojang's official mapped names and should carry over
-  identically to Paper's mojmap runtime. Both transformers log how many call
-  sites they patched at startup specifically so a mismatch is loud, not
-  silent - if you see the "found 0 ... to patch" warnings, decompile the
-  actual class in your version and adjust.
-- **`build_datapack.py` / `FarlandsOriginDatapackInstaller`'s reference-vs-inline
-  detection for `final_density`** - based on the pattern already visible in
-  your mod's own `old_overworld_noise.json` (which references sibling
-  entries like `minecraft:overworld/sloped_cheese` by ID), so `final_density`
-  is very likely also a plain string reference in modern vanilla data - but
-  both handle the inline-object case too, just in case.
-- **`FarlandsOriginDatapackInstaller`'s server-root detection** - uses the
-  server process's working directory (`Path.of("").toAbsolutePath()`),
-  which is where `server.properties`/`world/`/`plugins/` all live relative
-  to for a normally-launched server (`java -jar ... folia.jar` run from
-  inside the server folder). An earlier version of this tried to derive it
-  from `context.getDataDirectory()` instead and threw a
-  `NullPointerException` on a real server - that path turned out to be
-  relative, not absolute, so walking up two parents overshot past the root.
-  If you launch the server with a working directory that ISN'T the actual
-  server folder (unusual, but possible with some wrapper scripts/process
-  managers), this will still get it wrong - same symptom as before ("Wrote
-  Far Lands override..." logs appearing but generation not actually
-  changing) and same fix (fall back to the manual script, which sidesteps
-  this by taking the world's datapacks path from you directly).
-- **`pack_format` in `pack.mcmeta`** - auto-detected from `version.json` on
-  the classpath (or in the server jar, for the manual script) if present;
-  verify against your server's actual vanilla datapack if generation
-  refuses to load with a pack-format warning/error.
-- **Java agent self-sufficiency** - `Launch-Agent-Class`/`Premain-Class` are
-  both set in the manifest so the same jar works whether attached via
-  `-javaagent:` (recommended, used above) or (if you ever need it) a
-  self-attach at runtime; only the `-javaagent:` path has been reasoned
-  through carefully here.
+## What was and wasn't verified
 
-None of these are "this definitely won't work" - they're the concrete,
-falsifiable things to check on a real test server before relying on this,
-listed instead of glossed over.
+Verified in the environment that produced this version:
+- All sources compile against the real Folia API signatures and ASM 9.9.1
+  (Minecraft's own classes stubbed from the real 26.3 source).
+- The `BlendedNoise` hook: run through a real JVM with `-Xverify:all`, under a
+  classloader layout that reproduces the 26.2 crash (server loader that cannot
+  see plugin classes). Both return paths wrapped, unrelated methods untouched,
+  and X/Z adjustment matches `ClassicFarlands.adjustCoordinate` exactly,
+  including the volume fast path / point-by-point fallback and a custom distance.
+- The agent with a real `-javaagent:`: flags set, an admin's explicit
+  `=false` respected, hook applied at class-load, failure degrades to vanilla.
+- The datapack generation, end-to-end, against the real 26.3 data files
+  (`tools/build_datapack.py`, same algorithm as the Java installer).
+- Every NMS signature the plugin touches was checked against the 26.3 source.
 
-## Fixed during real-server testing (kept here as a record)
+**Not** verified here (needs a real 26.3 server): the Java installer itself
+and the registry registration were type-checked but not executed against the
+real game, and the datapack was not loaded by a real 26.3 server. Whether the
+resulting terrain *looks* like authentic Far Lands is a visual judgement only
+a real run can give. 26.3's noise code is float-based and was rewritten, so
+the look may differ in detail from older versions.
 
-Confirmed against a live Folia 26.1.2 server:
+One design note: the BlendedNoise hook reaches the plugin through a
+`java.util.function.Function` stored in a JVM-wide system property
+(`farlandsorigin.samplerBridge`). That is a non-`String` value in
+`System.getProperties()`, which is fine for normal lookups but would break
+code that blindly casts every property value to `String` (e.g.
+`Properties.store`). None is known in Paper/Folia.
 
-- **ASM couldn't parse JDK 25 class files at all** (`Unsupported class file
-  major version 69`) - ASM added Java 25 support in 9.8; anything earlier
-  fails outright. Pinned to `asm_version=9.8`.
-- **`ClassWriter`'s default `getCommonSuperClass` can't see NMS types** -
-  it resolves via the agent's own classloader by default, which has no
-  visibility into Folia's server classes. Fixed with
-  `TargetLoaderClassWriter`, which resolves against the classloader that's
-  actually loading the class being transformed.
-- **A plain `invokestatic` from `BlendedNoise` to a separate helper class
-  failed with `NoClassDefFoundError`** - the JVM resolves that symbolic
-  reference using BlendedNoise's own defining classloader, and
-  Paperclip/Folia's loader doesn't have this plugin's jar on its search
-  path. Fixed by having `BlendedNoiseTransformer` copy the helper's
-  compiled field+method bytecode directly onto `BlendedNoise` itself
-  (see that class's Javadoc), so nothing needs cross-classloader
-  resolution at runtime. Configuration crosses the same boundary via JVM
-  system properties (`farlandsorigin.coordinateDistance` /
-  `farlandsorigin.baseDistance`) rather than a shared class's static
-  fields, for the same reason.
+## Record of problems found on real servers
+
+- **26.2: ASM couldn't parse JDK 25 class files** (`Unsupported class file
+  major version 69`) - needs ASM 9.8+. Now pinned to 9.9.1 (what Folia ships).
+- **26.2: `ClassWriter.getCommonSuperClass` couldn't see Minecraft types** - it
+  resolves through the agent's classloader by default. `TargetLoaderClassWriter`
+  resolves against the classloader that is loading the target class.
+- **26.2: a plain `invokestatic` from `BlendedNoise` into plugin code failed
+  with `NoClassDefFoundError`** - the JVM resolves it with BlendedNoise's own
+  loader, which can't see the plugin. The injected method must reference only
+  JDK and Minecraft classes (`BlendedNoiseTransformer` enforces this at agent
+  time), and reaches the plugin through a JDK-typed bridge.
+- **26.2: `context.getDataDirectory()` is relative**, so deriving the server
+  root from its parents returned `null`. The working directory is used instead.
+- **26.3: the whole density function system was rewritten** (see the table),
+  and the datapack JSON format changed with it.

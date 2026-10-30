@@ -4,6 +4,10 @@ import io.papermc.paper.plugin.bootstrap.BootstrapContext;
 import io.papermc.paper.plugin.bootstrap.PluginBootstrap;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.Identifier;
+import net.minecraft.world.level.levelgen.densityfunction.DensitySampler;
+
+import java.nio.file.Path;
+import java.util.function.Function;
 
 /**
  * Paper runs {@link PluginBootstrap#bootstrap} before datapack-driven
@@ -17,20 +21,24 @@ import net.minecraft.resources.Identifier;
  *
  * This is the equivalent of the Fabric mod's
  * {@code Registry.register(BuiltInRegistries.DENSITY_FUNCTION_TYPE, ...)}
- * call in {@code FarlandsOrigin#onInitialize}, just reached through
+ * call in {@code ClassicFarlands#onInitialize}, just reached through
  * reflection instead of a normal registration call, since
  * {@code BuiltInRegistries.DENSITY_FUNCTION_TYPE} is already frozen by the
  * time any Paper plugin code runs (see {@link NmsRegistryUnfreezer}).
  */
 public final class FarlandsOriginBootstrap implements PluginBootstrap {
+    /** Class that only exists on 26.3+; 26.2 and earlier have net.minecraft.world.level.levelgen.DensityFunction. */
+    private static final String MODERN_DENSITY_FUNCTION =
+            "net.minecraft.world.level.levelgen.densityfunction.DensityFunction";
+
     @Override
     public void bootstrap(BootstrapContext context) {
-        // Safe default before config.yml is actually read in onEnable() -
-        // this also happens to be early enough to cover the (unlikely, but
-        // possible on some server setups) case where worldgen starts before
-        // plugins finish enabling. onEnable() overwrites this with the real
-        // configured value once config.yml has loaded.
-        FarlandsOriginState.reload(FarlandsOriginState.BASE_DISTANCE);
+        requireModernDensityFunctions();
+
+        // Apply config.yml's distance right away. Spawn chunks are generated
+        // before plugins enable, so waiting for onEnable() would be too late.
+        Path dataDirectory = Path.of("").toAbsolutePath().resolve(context.getDataDirectory());
+        FarlandsOriginState.reload(FarlandsOriginState.readConfiguredDistance(dataDirectory.resolve("config.yml")));
 
         NmsRegistryUnfreezer.forceRegister(
                 BuiltInRegistries.DENSITY_FUNCTION_TYPE,
@@ -39,9 +47,27 @@ public final class FarlandsOriginBootstrap implements PluginBootstrap {
         );
         context.getLogger().info("Registered farlandsorigin:radius_check density function type.");
 
-        // Must also happen here, before the datapack scan that (per this
-        // project's own server logs) follows shortly after bootstrap()
-        // returns - see FarlandsOriginDatapackInstaller for how/why.
+        // How the bytecode hook on BlendedNoise (see BlendedNoiseTransformer /
+        // BlendedNoiseHook) reaches back into this plugin. It is deliberately a
+        // plain java.util.function.Function in a JVM-wide system property:
+        // BlendedNoise's classloader can't resolve any of our classes by name,
+        // but it can call a JDK interface, and the object behind it is
+        // allowed to see Minecraft's classes (the direction that always worked).
+        Function<Object, Object> samplerBridge = sampler -> new BlendedNoiseSampler((DensitySampler) sampler);
+        System.getProperties().put(BlendedNoiseTransformer.BRIDGE_PROPERTY, samplerBridge);
+
+        // Must also happen here, before the datapack scan that follows shortly
+        // after bootstrap() returns - see FarlandsOriginDatapackInstaller.
         FarlandsOriginDatapackInstaller.install(context);
+    }
+
+    private static void requireModernDensityFunctions() {
+        try {
+            Class.forName(MODERN_DENSITY_FUNCTION, false, FarlandsOriginBootstrap.class.getClassLoader());
+        } catch (ClassNotFoundException e) {
+            throw new IllegalStateException("This build of FarlandsOrigin needs Minecraft 26.3 or newer: 26.3 " +
+                    "rewrote the density function system this plugin plugs into. On 26.2 or older, use a " +
+                    "FarlandsOrigin 1.0.x build instead.", e);
+        }
     }
 }

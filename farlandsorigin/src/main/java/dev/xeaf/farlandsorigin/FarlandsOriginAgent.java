@@ -5,22 +5,30 @@ import java.lang.instrument.Instrumentation;
 import java.security.ProtectionDomain;
 
 /**
- * Entry point when the plugin jar is loaded with {@code -javaagent:}. This is
- * what makes the Far Lands coordinate-wrap trick possible at all: Paper's
- * plugin API has no hook into {@code BlendedNoise}/{@code PerlinNoise}'s
- * internal sampling math, so the only way to change it (short of shipping a
- * hand-patched server jar) is bytecode instrumentation.
+ * Entry point when the plugin jar is loaded with {@code -javaagent:}.
+ *
+ * Does two things, both of which have to happen before the server's own
+ * classes load, which is why this can't be done from inside the plugin:
+ *
+ * 1. Turns on Mojang's built-in Far Lands switch. Minecraft 26.3 added
+ *    {@code SharedConstants.DEBUG_ENABLE_FARLANDS}, which makes
+ *    {@code GradientNoise.wrap} (the precision fix the old PerlinNoiseMixin
+ *    reverted) return its input unchanged. It is a {@code static final}
+ *    read from system properties exactly once, when SharedConstants
+ *    initializes - so the properties must be set before that, i.e. here.
+ *    {@code MC_DEBUG_ENABLED} is only the master gate inside the game's
+ *    {@code debugFlag()} helper (nothing else reads it), so enabling it
+ *    does not switch on any other debug behaviour.
+ *
+ * 2. Registers the transformer that hooks BlendedNoise (see
+ *    {@link BlendedNoiseTransformer}).
  *
  * Required server start flag:
- * {@code -javaagent:plugins/FarlandsOrigin.jar}
- *
- * Add it BEFORE {@code -jar paper.jar ...} on the command line / in your
- * launch script, since agents must be specified as their own JVM flag, not a
- * plugin option - Paper has no way to attach an agent for you after the JVM
- * has already started.
+ * {@code -javaagent:plugins/farlandsorigin-<version>.jar}
+ * placed BEFORE {@code -jar}.
  */
 public final class FarlandsOriginAgent {
-    private static volatile boolean attached = false;
+    private static final String BLENDED_NOISE = "net/minecraft/world/level/levelgen/synth/BlendedNoise";
 
     private FarlandsOriginAgent() {}
 
@@ -35,43 +43,39 @@ public final class FarlandsOriginAgent {
     }
 
     private static void install(Instrumentation inst) {
+        // Respect an explicit choice by the admin (e.g. -DMC_DEBUG_ENABLE_FARLANDS=false).
+        setIfAbsent("MC_DEBUG_ENABLED", "true");
+        setIfAbsent("MC_DEBUG_ENABLE_FARLANDS", "true");
+
         inst.addTransformer(new ClassFileTransformer() {
             @Override
             public byte[] transform(ClassLoader loader, String className, Class<?> classBeingRedefined,
                                      ProtectionDomain protectionDomain, byte[] classfileBuffer) {
+                if (!BLENDED_NOISE.equals(className)) return null;
                 try {
-                    if ("net/minecraft/world/level/levelgen/synth/BlendedNoise".equals(className)) {
-                        return BlendedNoiseTransformer.transform(classfileBuffer, loader);
-                    }
-                    if ("net/minecraft/world/level/levelgen/synth/PerlinNoise".equals(className)) {
-                        return PerlinNoiseTransformer.transform(classfileBuffer, loader);
-                    }
+                    return BlendedNoiseTransformer.transform(classfileBuffer, loader);
                 } catch (Throwable t) {
-                    // Fail loudly but don't take the server down mid-transform;
-                    // FarlandsOrigin#onEnable logs isAttached() state and
-                    // whoever's watching the console will see this stack trace
-                    // either way.
+                    // Fail loudly but don't take the server down mid-transform:
+                    // returning null leaves the class unmodified, and
+                    // FarlandsOrigin#onEnable reports the missing patch.
                     System.err.println("[FarlandsOrigin] Failed to transform " + className + ":");
                     t.printStackTrace();
+                    return null;
                 }
-                return null; // no change
             }
         }, false);
-        attached = true;
 
-        // -javaagent: loads THIS class via one classloader, and Paper loads
-        // the plugin jar (including a SEPARATE copy of this exact class)
-        // via its own PluginClassLoader - two different Class objects, two
-        // independent copies of the `attached` field. FarlandsOrigin's
-        // onEnable() calling isAttached() on its own copy would always see
-        // the untouched `false` default, even though the agent (running as
-        // a totally different copy of this class) attached successfully -
-        // same cross-classloader trap as FarlandsOriginCoordinateHelper,
-        // same fix: a JVM-wide system property instead of a static field.
+        // The plugin is loaded by a different classloader and gets its own copy
+        // of this class, so a static field here would never be seen by it - a
+        // JVM-wide system property is.
         System.setProperty("farlandsorigin.agentAttached", "true");
     }
 
+    private static void setIfAbsent(String key, String value) {
+        if (System.getProperty(key) == null) System.setProperty(key, value);
+    }
+
     public static boolean isAttached() {
-        return attached || Boolean.parseBoolean(System.getProperty("farlandsorigin.agentAttached", "false"));
+        return Boolean.getBoolean("farlandsorigin.agentAttached");
     }
 }

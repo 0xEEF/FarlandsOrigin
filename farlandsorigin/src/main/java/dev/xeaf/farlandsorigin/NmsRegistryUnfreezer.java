@@ -3,31 +3,37 @@ package dev.xeaf.farlandsorigin;
 import com.mojang.serialization.MapCodec;
 import net.minecraft.core.Registry;
 import net.minecraft.resources.Identifier;
-import net.minecraft.world.level.levelgen.DensityFunction;
+import net.minecraft.world.level.levelgen.densityfunction.DensityFunction;
 
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.reflect.Field;
 
 /**
- * On Fabric, {@code Registry.register(BuiltInRegistries.DENSITY_FUNCTION_TYPE, ...)}
- * works because Fabric's mod-init hook runs before {@code Bootstrap.bootStrap()}
- * freezes the built-in registries. Paper plugins never get to run that early -
- * by the time {@link FarlandsOriginBootstrap#bootstrap} executes,
- * {@code BuiltInRegistries.DENSITY_FUNCTION_TYPE} is already frozen.
+ * Registers into a Java built-in registry that Paper has no API for (its
+ * {@code RegistryEvents} only covers datapack-backed registries such as
+ * enchantments, entity variants and dialogs - not the codec-dispatch
+ * registries worldgen density functions use).
  *
- * There is no supported Paper API for this (its {@code RegistryEvents} only
- * covers a fixed set of data-driven, datapack-backed registries - enchantments,
- * entity variants, dialogs, etc. - not the Java-side codec-dispatch registries
- * worldgen density functions use). So this reflects into vanilla's
- * {@code MappedRegistry} to temporarily unfreeze it, exactly the way several
- * existing NMS-based worldgen plugins already do for similar problems.
+ * Timing is what makes this work: Paper runs plugin bootstrappers at the top
+ * of {@code Bootstrap.bootStrap()}, BEFORE {@code BuiltInRegistries.bootStrap()}
+ * fills the built-in registries and freezes them. At that moment
+ * {@code DENSITY_FUNCTION_TYPE} already exists (referencing it initializes
+ * {@code BuiltInRegistries}) but is still empty and unfrozen, so a plain
+ * {@code Registry.register} is enough, and the later {@code freeze()} binds
+ * our entry's holder along with all the vanilla ones. (An earlier version of
+ * this comment claimed the registry was already frozen; it isn't.)
  *
- * This is inherently fragile across Minecraft versions: if Mojang renames the
- * frozen-state field, this will fail loudly (NoSuchFieldException) at server
- * boot rather than silently generating wrong terrain, which is the safest
- * failure mode available here. Verify the field name below against the
- * actual 26.1/26.2 {@code MappedRegistry} class if this throws.
+ * The unfreeze/refreeze below is therefore only a safety net, for a
+ * hypothetical future where bootstrappers run later. Note it would NOT be a
+ * complete fix there: {@code register} leaves the new holder unbound until
+ * the next {@code freeze()}, so values registered into an already-frozen
+ * registry can't be read. If that ever becomes the situation, bind the
+ * holder too, or run earlier.
+ *
+ * Fragile across Minecraft versions in the way reflection always is: if
+ * Mojang renames the frozen-state field of {@code MappedRegistry} this fails
+ * loudly at boot, rather than silently generating wrong terrain.
  */
 final class NmsRegistryUnfreezer {
     private NmsRegistryUnfreezer() {}

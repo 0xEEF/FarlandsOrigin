@@ -1,6 +1,7 @@
 {
   "pack": {
-    "description": "ClassicFarlands - Far Lands worldgen overrides (companion datapack for the Paper port)",
-    "pack_format": 71
+    "description": "FarlandsOrigin - Far Lands worldgen overrides",
+    "min_format": 121,
+    "max_format": 121
   }
 }

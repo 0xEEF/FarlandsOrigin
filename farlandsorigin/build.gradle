@@ -20,17 +20,13 @@ dependencies {
     // not just a dev-time convenience remapped away at build time.
     paperweight.paperDevBundle("${project.minecraft_version}.build.+")
 
-    // Plain ASM for the java agent's bytecode transform. Deliberately NOT using
-    // SpongePowered Mixin here: modern Mixin (the version Fabric mods use) is
-    // built around an IMixinService tied to a launch platform (Fabric's Knot
-    // loader, ModLauncher, LaunchWrapper, ...) and does not have an officially
-    // supported "just run it from a plain -javaagent on a stock JVM" mode. The
-    // old standalone "agent" module in the Mixin repo is a different, legacy
-    // mechanism (class hot-swap for dev tooling), not the mixin-transform
-    // pipeline mixinextras/@ModifyExpressionValue etc. rely on. Rather than
-    // ship an unverifiable bootstrap sequence, this does the two required
-    // bytecode edits directly with ASM, which is stable, well-documented, and
-    // works with a plain java.lang.instrument agent.
+    // Plain ASM for the java agent's one bytecode edit (the BlendedNoise hook).
+    // Deliberately NOT SpongePowered Mixin: modern Mixin is built around an
+    // IMixinService tied to a launch platform (Fabric's Knot loader,
+    // ModLauncher, ...) and has no supported "just run it from a plain
+    // -javaagent on a stock JVM" mode. ASM works with java.lang.instrument
+    // as-is. (The other half of the original mod - un-fixing noise precision -
+    // needs no bytecode on 26.3+: Mojang added SharedConstants.DEBUG_ENABLE_FARLANDS.)
     implementation "org.ow2.asm:asm:${asm_version}"
     implementation "org.ow2.asm:asm-tree:${asm_version}"
     implementation "org.ow2.asm:asm-commons:${asm_version}"
@@ -52,8 +48,8 @@ dependencies {
 // behaviour across this exact version boundary.
 paperweight.reobfArtifactConfiguration = io.papermc.paperweight.userdev.ReobfArtifactConfiguration.getMOJANG_PRODUCTION()
 
-// Paper 26.2's dev bundle (paper-api, leafpile, etc.) is compiled for and
-// requires JVM runtime 25+ - this isn't optional/backwards compatible like
+// Paper 26.2+ dev bundles (paper-api, leafpile, etc.) are compiled for and
+// require JVM runtime 25+ - this isn't optional/backwards compatible like
 // most "options.release" choices usually are. Build (and run Gradle itself)
 // with JDK 25. If paperweightUserdevSetup or compileJava complain about a
 // *different* required version later (Paper bumps this over time), match
@@ -87,7 +83,7 @@ shadowJar {
         attributes(
                 // Standard java.lang.instrument agent entry point. Server owners
                 // add -javaagent:plugins/FarlandsOrigin.jar to their startup
-                // flags; this is what makes real bytecode-level Mixin injection
+                // flags; this is what makes bytecode instrumentation
                 // possible at all outside of a mod loader.
                 'Launch-Agent-Class': 'dev.xeaf.farlandsorigin.FarlandsOriginAgent',
                 'Premain-Class'     : 'dev.xeaf.farlandsorigin.FarlandsOriginAgent',

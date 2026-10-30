@@ -1,0 +1,10 @@
+{
+  "type": "minecraft:range_choice",
+  "input": {
+    "type": "farlandsorigin:radius_check"
+  },
+  "min_inclusive": 1,
+  "max_exclusive": 2,
+  "when_in_range": "farlandsorigin:old_overworld_noise",
+  "when_out_of_range": "minecraft:overworld/final_density"
+}

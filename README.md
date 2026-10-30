@@ -61,6 +61,15 @@ replaces those.
 5. **Seeing it:** `/tp @s 12550830 100 0` in creative/spectator, in an area
    that has never been generated.
 
+**Upgrading:** just replace the jar. On every start the installer deletes and
+regenerates its own `datapacks/farlandsorigin/` folder, and also removes any
+folder an earlier version left behind under the old `classicfarlands`
+namespace (those can no longer load and would break the server's registry
+loading). It only ever deletes folders that are recognisably its own - another
+datapack next to it is never touched, and if something that isn't ours already
+occupies the `farlandsorigin` folder name, it logs an error and installs
+nothing rather than overwrite it.
+
 **Existing worlds:** the datapack and agent only affect chunks generated
 *after* they're in place - chunks already on disk keep whatever they were
 generated as. Test in a fresh world or unexplored coordinates.

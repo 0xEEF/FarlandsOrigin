@@ -18,9 +18,11 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import java.util.stream.Stream;
 
 /**
  * Automatic equivalent of {@code tools/build_datapack.py} - same logic,
@@ -60,6 +62,9 @@ import java.util.Properties;
  */
 final class FarlandsOriginDatapackInstaller {
     private static final String NAMESPACE = "farlandsorigin";
+    private static final String PACK_FOLDER = "farlandsorigin";
+    /** Namespace used before the project was renamed; datapacks using it can no longer load. */
+    private static final String LEGACY_NAMESPACE = "classicfarlands";
     private static final List<String> PRESETS = List.of("overworld", "amplified", "large_biomes");
     private static final String NOISE_SETTINGS_PREFIX = "data/minecraft/worldgen/noise_settings/";
     private static final String VANILLA_FINAL_DENSITY =
@@ -75,7 +80,14 @@ final class FarlandsOriginDatapackInstaller {
         try {
             Path serverRoot = findServerRoot();
             String levelName = readLevelName(serverRoot);
-            Path datapackDir = serverRoot.resolve(levelName).resolve("datapacks").resolve("farlandsorigin");
+            Path datapacksDir = serverRoot.resolve(levelName).resolve("datapacks");
+            Path datapackDir = datapacksDir.resolve(PACK_FOLDER);
+
+            // Start from a clean slate: overwriting files in place would leave
+            // behind anything a previous version wrote that this one doesn't
+            // (renamed files, an old namespace, a differently named folder).
+            if (!removeOwnedDatapacks(context, datapacksDir, datapackDir)) return;
+
             Path namespaceDensityDir = datapackDir.resolve("data").resolve(NAMESPACE)
                     .resolve("worldgen").resolve("density_function");
             Path noiseSettingsDir = datapackDir.resolve("data").resolve("minecraft")
@@ -149,6 +161,79 @@ final class FarlandsOriginDatapackInstaller {
             context.getLogger().error("Failed to auto-install the FarlandsOrigin datapack - Far Lands generation " +
                     "will NOT work until this is fixed. You can install it manually instead: see " +
                     "tools/build_datapack.py in the README.", e);
+        }
+    }
+
+    /**
+     * Removes datapack folders this plugin (in any version) created, so the
+     * fresh copy about to be written is the only one:
+     * <ul>
+     *   <li>the current {@code farlandsorigin/} folder, replaced wholesale;</li>
+     *   <li>any folder from before the rename (e.g. {@code classicfarlands-farlands/}).
+     *       Those reference the removed {@code classicfarlands:radius_check} type and
+     *       make the server fail to load its registries.</li>
+     * </ul>
+     * A folder is only touched if it is recognisably ours ({@link #isOurs}) -
+     * never an unrelated datapack that merely sits next to ours.
+     *
+     * @return false if something that is NOT ours is occupying our folder name,
+     *         in which case nothing is installed.
+     */
+    private static boolean removeOwnedDatapacks(BootstrapContext context, Path datapacksDir, Path datapackDir)
+            throws IOException {
+        if (!Files.isDirectory(datapacksDir)) return true;
+
+        if (Files.exists(datapackDir)) {
+            if (!isOurs(datapackDir)) {
+                context.getLogger().error("{} already exists in the datapacks folder but doesn't look like it was " +
+                        "created by FarlandsOrigin, so it was left alone and Far Lands generation will NOT be " +
+                        "installed. Rename or remove it and restart.", datapackDir);
+                return false;
+            }
+            deleteRecursively(datapackDir);
+            context.getLogger().info("Replacing the existing FarlandsOrigin datapack with a freshly generated one.");
+        }
+
+        try (Stream<Path> children = Files.list(datapacksDir)) {
+            for (Path child : children.filter(Files::isDirectory).toList()) {
+                if (child.equals(datapackDir)) continue;
+                if (Files.isDirectory(child.resolve("data").resolve(LEGACY_NAMESPACE)) && isOurs(child)) {
+                    deleteRecursively(child);
+                    context.getLogger().info("Removed the outdated datapack {} left by an earlier version " +
+                            "(it uses the old '" + LEGACY_NAMESPACE + "' namespace, which no longer exists).",
+                            child.getFileName());
+                }
+            }
+        }
+        return true;
+    }
+
+    /** True if the folder is a datapack this plugin wrote, under the current or the pre-rename name. */
+    static boolean isOurs(Path datapackFolder) {
+        if (Files.isDirectory(datapackFolder.resolve("data").resolve(NAMESPACE))) return true;
+        if (Files.isDirectory(datapackFolder.resolve("data").resolve(LEGACY_NAMESPACE))) {
+            // The old namespace is distinctive, but double-check the description so another
+            // mod that happens to reuse the name is never deleted.
+            return descriptionMentions(datapackFolder, "FarlandsOrigin", "ClassicFarlands");
+        }
+        return descriptionMentions(datapackFolder, "FarlandsOrigin");
+    }
+
+    private static boolean descriptionMentions(Path datapackFolder, String... needles) {
+        try {
+            String meta = Files.readString(datapackFolder.resolve("pack.mcmeta"), StandardCharsets.UTF_8);
+            for (String needle : needles) if (meta.contains(needle)) return true;
+        } catch (IOException ignored) {
+            // no readable pack.mcmeta: not ours
+        }
+        return false;
+    }
+
+    private static void deleteRecursively(Path root) throws IOException {
+        try (Stream<Path> paths = Files.walk(root)) {
+            for (Path path : paths.sorted(Comparator.reverseOrder()).toList()) {
+                Files.delete(path);
+            }
         }
     }
 
